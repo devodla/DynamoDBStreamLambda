@@ -1,10 +1,59 @@
 AWSTemplateFormatVersion: 2010-09-09
-
+Transform: AWS::Serverless-2016-10-31
 Description: >
   This stack creates DynamoDB table and subscribe looging Lambda function to
   DynamoDB stream.  
 
+Parameters:
+  LambdaRole:
+    Type: String
+    Description: Role Arn for Lambda function
+  Environment:
+    Type: String
+    Description: Enviroment variable        
+    AllowedValues:
+      - dev
+      - uat
+      - prod
+    Default: dev    
+    ConstraintDescription: must specify prod, dev, or uat
+  SecurityGroupK8s:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: SecurityGroup K8s
+  SubnetSecurityGroupK8s:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet K8s  
+
+Globals:
+  Function:
+    Handler: index.handler
+    Runtime: nodejs12.x
+    MemorySize: 128
+    Timeout: 3
+    Layers:
+      - !Ref LayerVersionOffshoreLessAccountServiceDependencies
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+    Tags:
+      env: !Sub offshore-${Environment}
+      service: offshore-less-account-service
+      service_group: offshore
+      version: 0.0.0
+
 Resources:
+
+  # Layers
+  LayerVersionOffshoreLessAccountServiceDependencies:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: offshore-less-account-dependencies
+      Description: Node Dependencies for offshore-less-account-service
+      ContentUri: lambda/layers/dependencies
+      CompatibleRuntimes:
+        - nodejs12.x
+        - nodejs14.x
+      LicenseInfo: "MIT"  
 
   rLoggingFunction: # Lambda function declaration, which logs all incoming stream events from DynamoDB.
     Type: AWS::Lambda::Function
@@ -94,6 +143,61 @@ Resources:
         - - '/aws/lambda/'
           -  !Ref rLoggingFunction
       RetentionInDays: 14
+
+  DynamoOffshoreLessAccountFirstBackup: # DynamoDB table declaration for saving account
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      TableName: TB_OFFSHORE_LESS_ACCOUNT_BONE
+      AttributeDefinitions:
+        - AttributeName: accountId
+          AttributeType: N
+      KeySchema:
+        - AttributeName: accountId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: OLD_IMAGE
+
+  DynamoOffshoreLessAccountSecondBackup: # DynamoDB table declaration for saving account
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      TableName: TB_OFFSHORE_LESS_ACCOUNT_BTWO
+      AttributeDefinitions:
+        - AttributeName: accountId
+          AttributeType: N
+      KeySchema:
+        - AttributeName: accountId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+  
+  LambdaOffshoreLessAccountProcessBackup:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: OFFSHORE-LESS-ACCOUNT-PROCESS-BACKUP
+      Timeout: 30
+      MemorySize: 256
+      Role: !Ref LambdaRole
+      CodeUri: lambda/functions/offshore-less-account-process-backup
+      Description: "Process backup of account from DynamoDbBOne"
+      VpcConfig:
+        SecurityGroupIds: !Ref SecurityGroupK8s
+        SubnetIds: !Ref SubnetSecurityGroupK8s
+      Environment:
+        Variables:
+          TB_OFFSHORE_LESS_ACCOUNT_BTWO: TB_OFFSHORE_LESS_ACCOUNT_BTWO
+    Metadata:
+      BuildMethod: makefile
+
+  EventDynamoOffshoreLessAccountFirstBackup: # connection of DynamoDB Stream and Lambda function.
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      # The maximum number of DB items to send to Lambda
+      BatchSize: 100
+      Enabled: True
+      EventSourceArn: !GetAtt DynamoOffshoreLessAccountFirstBackup.StreamArn
+      FunctionName: !GetAtt rLoggingFunction.Arn
+      # Always start at the tail of the Stream
+      StartingPosition: LATEST
 
 Outputs:
 
